@@ -1,0 +1,82 @@
+---
+- name: Setup Infrastructure for Yii2 Application
+  hosts: production
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    required_packages:
+      - curl
+      - wget
+      - git
+      - unzip
+      - software-properties-common
+      - apt-transport-https
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - python3-pip
+      - python3-setuptools
+    
+    pip_packages:
+      - docker
+      - docker-compose
+      - pyyaml
+  
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Install required system packages
+      apt:
+        name: "{{ required_packages }}"
+        state: present
+        
+    - name: Install Python packages
+      pip:
+        name: "{{ pip_packages }}"
+        state: present
+
+  roles:
+    - docker
+    - nginx
+    - swarm
+  
+  post_tasks:
+    - name: Configure firewall rules
+      ufw:
+        rule: "{{ item.rule }}"
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop:
+        - { rule: 'allow', port: '22', proto: 'tcp' }    # SSH
+        - { rule: 'allow', port: '80', proto: 'tcp' }    # HTTP
+        - { rule: 'allow', port: '443', proto: 'tcp' }   # HTTPS
+        - { rule: 'allow', port: '9090', proto: 'tcp' }  # Prometheus
+      notify: enable firewall
+    
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      loop:
+        - /opt/{{ app_name }}
+        - /opt/{{ app_name }}/logs
+        - /opt/{{ app_name }}/data
+        - /var/log/{{ app_name }}
+    
+    - name: Set up log rotation
+      template:
+        src: ../templates/logrotate.j2
+        dest: /etc/logrotate.d/{{ app_name }}
+        mode: '0644'
+  
+  handlers:
+    - name: enable firewall
+      ufw:
+        state: enabled

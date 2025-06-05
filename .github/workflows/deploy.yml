@@ -1,0 +1,196 @@
+name: Deploy Yii2 Application
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.1'
+        extensions: mbstring, xml, ctype, iconv, intl, pdo, pdo_mysql, dom, filter, gd, json, zip
+
+    - name: Cache Composer packages
+      id: composer-cache
+      uses: actions/cache@v3
+      with:
+        path: vendor
+        key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-php-
+
+    - name: Install dependencies
+      run: |
+        cd yii2-app
+        composer install --prefer-dist --no-progress
+
+    - name: Run tests
+      run: |
+        cd yii2-app
+        php requirements.php
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    if: always() && (needs.test.result == 'success' || github.event_name == 'push')
+    
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64
+
+    - name: Output image name
+      id: image
+      run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Ansible and dependencies
+      run: |
+        pip install ansible docker docker-compose
+        ansible-galaxy collection install community.docker
+
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2-key.pem
+        chmod 600 ~/.ssh/ec2-key.pem
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Test SSH connection
+      run: |
+        ssh -i ~/.ssh/ec2-key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "echo 'SSH connection successful'"
+
+    - name: Update inventory with secrets
+      run: |
+        cd ansible
+        sed -i 's/YOUR_EC2_PUBLIC_IP/${{ secrets.EC2_HOST }}/g' inventory/hosts
+        sed -i 's/your-username/${{ github.actor }}/g' inventory/hosts
+
+    - name: Deploy application with Ansible
+      run: |
+        cd ansible
+        ansible-playbook -i inventory/hosts playbooks/deploy-application.yml \
+          -e "docker_image_name=${{ needs.build.outputs.image }}" \
+          -e "docker_image_tag=latest" \
+          -e "docker_username=${{ github.actor }}" \
+          -e "docker_password=${{ secrets.GITHUB_TOKEN }}" \
+          -e "github_username=${{ github.actor }}" \
+          -e "github_token=${{ secrets.GITHUB_TOKEN }}"
+      env:
+        ANSIBLE_HOST_KEY_CHECKING: False
+
+    - name: Health check
+      run: |
+        sleep 30
+        for i in {1..10}; do
+          if curl -f http://${{ secrets.EC2_HOST }}/health; then
+            echo "Health check passed"
+            break
+          else
+            echo "Health check failed, attempt $i/10"
+            sleep 10
+          fi
+          if [ $i -eq 10 ]; then
+            echo "Health check failed after 10 attempts"
+            exit 1
+          fi
+        done
+
+    - name: Verify deployment
+      run: |
+        echo "Deployment verification:"
+        curl -s http://${{ secrets.EC2_HOST }}/ | jq '.'
+        echo "Health check:"
+        curl -s http://${{ secrets.EC2_HOST }}/health | jq '.'
+
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        cd ansible
+        echo "Deployment failed, initiating rollback..."
+        ansible-playbook -i inventory/hosts playbooks/rollback.yml
+      env:
+        ANSIBLE_HOST_KEY_CHECKING: False
+
+  notify:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      run: |
+        if [ "${{ needs.deploy.result }}" == "success" ]; then
+          echo "✅ Deployment successful!"
+          echo "🌐 Application URL: http://${{ secrets.EC2_HOST }}/"
+          echo "💚 Health Check: http://${{ secrets.EC2_HOST }}/health"
+        else
+          echo "❌ Deployment failed!"
+          echo "Check the logs for more details."
+        fi

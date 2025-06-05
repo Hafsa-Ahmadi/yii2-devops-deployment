@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  yii2-app:
+    image: ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-latest}
+    deploy:
+      replicas: 2
+      placement:
+        max_replicas_per_node: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.3
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        failure_action: pause
+        monitor: 60s
+        max_failure_ratio: 0.3
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    ports:
+      - target: 9000
+        published: 9000
+        protocol: tcp
+        mode: host
+    environment:
+      - YII_DEBUG=0
+      - YII_ENV=prod
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm-healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - yii2-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  yii2-network:
+    driver: overlay
+    attachable: true

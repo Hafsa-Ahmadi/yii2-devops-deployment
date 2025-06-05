@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  yii2-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yii2-app-dev
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./yii2-app:/var/www/html
+      - ./logs:/var/www/html/runtime/logs
+    environment:
+      - YII_DEBUG=1
+      - YII_ENV=dev
+    networks:
+      - yii2-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-dev
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/yii2-app.conf:/etc/nginx/conf.d/default.conf
+      - ./yii2-app:/var/www/html
+    depends_on:
+      - yii2-app
+    networks:
+      - yii2-network
+
+networks:
+  yii2-network:
+    driver: bridge
+
+volumes:
+  logs:
+
+

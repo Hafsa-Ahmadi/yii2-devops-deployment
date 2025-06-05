@@ -1,0 +1,97 @@
+---
+- name: Deploy Yii2 Application
+  hosts: production
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    compose_file_path: /opt/{{ app_name }}/docker-compose.yml
+    env_file_path: /opt/{{ app_name }}/.env
+    backup_dir: /opt/{{ app_name }}/backups
+  
+  tasks:
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+    
+    - name: Backup current deployment (if exists)
+      shell: |
+        if docker stack ls | grep -q {{ app_name }}; then
+          docker stack rm {{ app_name }}
+          sleep 10
+        fi
+      ignore_errors: yes
+    
+    - name: Login to Docker registry
+      docker_login:
+        registry: "{{ docker_registry }}"
+        username: "{{ docker_username }}"
+        password: "{{ docker_password }}"
+        reauthorize: yes
+      when: docker_username is defined and docker_password is defined
+    
+    - name: Pull latest Docker image
+      docker_image:
+        name: "{{ docker_image_name }}:{{ docker_image_tag }}"
+        source: pull
+        force_source: yes
+      register: image_pull
+      retries: 3
+      delay: 10
+    
+    - name: Create environment file
+      template:
+        src: ../templates/env.j2
+        dest: "{{ env_file_path }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+    
+    - name: Copy docker-compose.prod.yml
+      copy:
+        src: ../../docker-compose.prod.yml
+        dest: "{{ compose_file_path }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+    
+    - name: Deploy application stack
+      docker_stack:
+        name: "{{ app_name }}"
+        compose:
+          - "{{ compose_file_path }}"
+        state: present
+      environment:
+        DOCKER_REGISTRY: "{{ docker_registry }}"
+        IMAGE_NAME: "{{ docker_image_name.split('/')[-1] }}"
+        IMAGE_TAG: "{{ docker_image_tag }}"
+      register: stack_deploy
+    
+    - name: Wait for application to be healthy
+      uri:
+        url: "http://{{ ansible_host }}/health"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: health_check
+      until: health_check.status == 200
+      retries: 30
+      delay: 10
+      
+    - name: Verify application is responding
+      uri:
+        url: "http://{{ ansible_host }}/"
+        method: GET
+      register: app_response
+      
+    - name: Display deployment status
+      debug:
+        msg: |
+          Deployment Status: {{ 'SUCCESS' if health_check.status == 200 else 'FAILED' }}
+          Application URL: http://{{ ansible_host }}/
+          Health Check URL: http://{{ ansible_host }}/health
+          Response: {{ app_response.json if app_response.json is defined else 'No JSON response' }}

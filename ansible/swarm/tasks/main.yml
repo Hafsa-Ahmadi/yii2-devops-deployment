@@ -1,0 +1,59 @@
+---
+- name: Check if Docker Swarm is already initialized
+  command: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}'
+  register: swarm_status
+  changed_when: false
+  failed_when: false
+
+- name: Initialize Docker Swarm
+  command: docker swarm init --advertise-addr {{ ansible_default_ipv4.address }}
+  when: swarm_status.stdout != "active"
+  register: swarm_init
+
+- name: Get Swarm join token for managers
+  command: docker swarm join-token manager -q
+  register: manager_token
+  changed_when: false
+  when: swarm_status.stdout == "active" or swarm_init.changed
+
+- name: Get Swarm join token for workers
+  command: docker swarm join-token worker -q
+  register: worker_token
+  changed_when: false
+  when: swarm_status.stdout == "active" or swarm_init.changed
+
+- name: Display Swarm information
+  debug:
+    msg: |
+      Docker Swarm Status: {{ swarm_status.stdout | default('newly_initialized') }}
+      Manager Join Token: {{ manager_token.stdout | default('N/A') }}
+      Worker Join Token: {{ worker_token.stdout | default('N/A') }}
+      Advertise Address: {{ ansible_default_ipv4.address }}
+
+- name: Create overlay networks for applications
+  docker_network:
+    name: "{{ item }}"
+    driver: overlay
+    attachable: yes
+    scope: swarm
+  loop:
+    - yii2-network
+    - monitoring-network
+  register: network_creation
+
+- name: Display network creation results
+  debug:
+    msg: "Created networks: {{ network_creation.results | map(attribute='network') | map(attribute='Name') | list }}"
+
+- name: Label node for application placement
+  command: docker node update --label-add app=yii2-devops {{ ansible_hostname }}
+  changed_when: false
+
+- name: Get Swarm node information
+  command: docker node ls
+  register: swarm_nodes
+  changed_when: false
+
+- name: Display Swarm nodes
+  debug:
+    msg: "{{ swarm_nodes.stdout_lines }}"

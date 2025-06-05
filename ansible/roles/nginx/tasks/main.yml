@@ -1,0 +1,96 @@
+---
+- name: Install NGINX
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+
+- name: Remove default NGINX configuration
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: restart nginx
+
+- name: Create NGINX configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/nginx/sites-available
+    - /etc/nginx/sites-enabled
+    - /etc/nginx/conf.d
+    - /var/log/nginx
+
+- name: Copy main NGINX configuration
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    backup: yes
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart nginx
+
+- name: Copy Yii2 application configuration
+  copy:
+    src: ../../nginx/yii2-app.conf
+    dest: /etc/nginx/sites-available/{{ app_name }}.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart nginx
+
+- name: Enable Yii2 application site
+  file:
+    src: /etc/nginx/sites-available/{{ app_name }}.conf
+    dest: /etc/nginx/sites-enabled/{{ app_name }}.conf
+    state: link
+  notify: restart nginx
+
+- name: Test NGINX configuration
+  command: nginx -t
+  register: nginx_test
+  changed_when: false
+  failed_when: nginx_test.rc != 0
+
+- name: Create NGINX log directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: adm
+    mode: '0755'
+  loop:
+    - /var/log/nginx
+    - /var/log/nginx/{{ app_name }}
+
+- name: Configure log rotation for NGINX
+  template:
+    src: nginx-logrotate.j2
+    dest: /etc/logrotate.d/nginx-{{ app_name }}
+    mode: '0644'
+
+- name: Start and enable NGINX
+  systemd:
+    name: nginx
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: Verify NGINX is running
+  uri:
+    url: http://localhost/nginx-health
+    method: GET
+    status_code: 200
+  register: nginx_health
+  retries: 5
+  delay: 2
+
+handlers:
+  - name: restart nginx
+    systemd:
+      name: nginx
+      state: restarted
